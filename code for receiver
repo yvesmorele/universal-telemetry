@@ -1,0 +1,294 @@
+
+
+//Librairies pour LoRa
+
+#include <SPI.h>
+#include <LoRa.h>
+#include <WiFi.h>
+#include <BluetoothSerial.h>
+#include <droneID_FR.h>
+
+extern "C" {
+#include "esp_wifi.h"
+esp_err_t esp_wifi_80211_tx(wifi_interface_t ifx, const void *buffer, int len, bool en_sys_seq);
+}
+
+droneIDFR drone_idfr;
+
+/********************************************************************************************************************
+ * MODIFIEZ LES VALEURS ICI
+ ********************************************************************************************************************/
+// Set these to your desired credentials.
+/**
+  * Le nom du point d'acces wifi CHANGEZ LE par ce que vous voulez !!!
+  */
+const char ssid[] = "baliseDGAC";
+
+// Mot de pass du wifi
+const char *password = "123456789";
+/**
+  * CHANGEZ l'ID du drone par celui que Alphatango vous a fourni (Trigramme + Modèle + numéro série) !
+  */
+const char drone_id[] = "000000000000000000UAS-FR-19123";
+
+/********************************************************************************************************************/
+// NE PAS TOUCHEZ A PARTIR D'ICI !!!
+// Le wifi est sur le channel 6 conformement à la spécification
+static constexpr uint8_t wifi_channel = 6;
+// Ensure the drone_id is max 30 letters
+static_assert((sizeof(ssid)/sizeof(*ssid))<=32, "AP SSID should be less than 32 letters");
+// Ensure the drone_id is max 30 letters
+static_assert((sizeof(drone_id)/sizeof(*drone_id))<=31, "Drone ID should be less that 30 letters !");  // 30 lettres + null termination
+// beacon frame definition
+static constexpr uint16_t MAX_BEACON_SIZE = 40 + 32 + droneIDFR::FRAME_PAYLOAD_LEN_MAX;  // default beaconPacket size + max ssid size + max drone id frame size
+uint8_t beaconPacket[MAX_BEACON_SIZE] = {
+        0x80, 0x00,                          // 0-1: Frame Control
+        0x00, 0x00,                         // 2-3: Duration
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,       // 4-9: Destination address (broadcast)
+        0x24, 0x62, 0xab, 0xdd, 0xb0, 0xbd,       // 10-15: Source address FAKE  // TODO should bet set manually
+        0x24, 0x62, 0xab, 0xdd, 0xb0, 0xbd,       // 16-21: Source address FAKE
+        0x00, 0x00,                         // 22-23: Sequence / fragment number (done by the SDK)
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, // 24-31: Timestamp (GETS OVERWRITTEN TO 0 BY HARDWARE)
+        0xB8, 0x0B,                         // 32-33: Beacon interval: set to 3s == 3000TU== BB8, bytes in reverse order  // TODO: manually set it
+        0x21, 0x04,                         // 34-35: Capability info
+        0x03, 0x01, 0x06,                   // 36-38: DS Parameter set, current channel 6 (= 0x06), // TODO: manually set it
+        0x00, 0x20,                             // 39-40: SSID parameter set, 0x20:maxlength:content
+                                                        // 41-XX: SSID (max 32)
+};
+
+
+#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
+#error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
+#endif
+
+
+BluetoothSerial SerialBT;
+
+//Librairies pour ecran OLED 
+
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+//definition  des  pins utilisés par l'emetteur  LoRa 
+
+#define SCK 5
+#define MISO 19
+#define MOSI 27
+#define SS 18
+#define RST 14
+#define DIO0 26
+
+//433E6 pour Asie
+//866E6 pour Europe
+//915E6 pour Amerique du nord
+#define BAND 866E6
+
+// pins ecran OLED
+
+#define OLED_SDA 4
+#define OLED_SCL 15 
+#define OLED_RST 16
+#define SCREEN_WIDTH 128 // largeur OLED , en  pixels
+#define SCREEN_HEIGHT 64 // hauteur OLED , en pixels
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST);
+
+String LoRaData;
+
+void setup() { 
+
+  //reset OLED display 
+  pinMode(OLED_RST, OUTPUT);
+  digitalWrite(OLED_RST, LOW);
+  delay(20);
+  digitalWrite(OLED_RST, HIGH);
+  
+  //initialize OLED
+  Wire.begin(OLED_SDA, OLED_SCL);
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3c, false, false)) { // Address 0x3C for 128x32
+    Serial.println(F("SSD1306 allocation mauvaise"));
+    for(;;); // boucle en permanence
+  }
+
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  display.setTextSize(1);
+  display.setCursor(0,0);
+  display.print("LORA RECEIVER ");
+  display.display();
+  
+  //initialize Serial Monitor
+  Serial.begin(115200);
+ SerialBT.begin("ESP32test"); // nom du peripherique Bluetooth 
+  Serial.println("LoRa Receiver Test");
+  
+  //SPI LoRa pins
+  SPI.begin(SCK, MISO, MOSI, SS);
+  //setup LoRa transceiver module
+  LoRa.setPins(SS, RST, DIO0);
+
+  if (!LoRa.begin(BAND)) {
+    Serial.println("Starting LoRa failed!");
+    while (1);
+  }
+  Serial.println("LoRa Initializing OK!");
+  display.setCursor(0,10);
+  display.println("LoRa Initializing OK!");
+  display.display();  
+
+  /********************************************************************************************************************
+ * ICI ON INITIALISE LE WIFI
+ */
+    /**
+     * Pour mon exemple, je crée un point d'accés. Il fait rien par defaut.
+     */
+    Serial.println("Starting AP");
+    WiFi.softAP(ssid, nullptr, wifi_channel);
+    IPAddress myIP = WiFi.softAPIP();
+    Serial.print("AP IP address: ");
+    Serial.println(myIP);
+    Serial.print("AP mac address: ");
+    Serial.println(WiFi.macAddress());
+    wifi_config_t conf_current;
+    esp_wifi_get_config(WIFI_IF_AP, &conf_current);
+    // Change WIFI AP default beacon interval sending to 1s.
+    conf_current.ap.beacon_interval = 1000;
+    drone_idfr.set_drone_id(drone_id);
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &conf_current));
+
+
+  
+}
+void loop() {
+
+  //essai analyse paquet reçu
+  int packetSize = LoRa.parsePacket();
+  if (packetSize) {
+    
+    //lecture paquet
+    while (LoRa.available()) {
+      LoRaData = LoRa.readString();
+    
+    
+    }
+
+   // deinition RSSI 
+  int rssi = LoRa.packetRssi();
+   
+  
+   
+    
+ //   lecture données reçues
+
+String readString = (LoRaData);
+
+// divise la chaine lue par un delimiteur predefini qui est la virgule 
+
+int delimiter, delimiter_1, delimiter_2,  delimiter_3 ,  delimiter_4,  delimiter_5,  delimiter_6, delimiter_7, delimiter_8 , delimiter_9, delimiter_10 , delimiter_11;
+
+delimiter = readString.indexOf("#");
+delimiter_1 = readString.indexOf(",", delimiter + 1);
+delimiter_2 = readString.indexOf(",", delimiter_1 +1);
+delimiter_3 = readString.indexOf(",", delimiter_2 +1);
+delimiter_4 = readString.indexOf(",", delimiter_3 +1);
+delimiter_5 = readString.indexOf(",", delimiter_4 +1);
+delimiter_6 = readString.indexOf(",", delimiter_5 +1);
+delimiter_7 = readString.indexOf(",", delimiter_6 +1);
+delimiter_8 = readString.indexOf(",", delimiter_7 +1);
+delimiter_9 = readString.indexOf(",", delimiter_8 +1);
+delimiter_10 = readString.indexOf(",", delimiter_9 +1);
+delimiter_11 = readString.indexOf(",", delimiter_10 +1);
+
+// definition des noms de variables avec les delimiteurs pour les sous chaines
+
+String heure = readString.substring(delimiter + 1, delimiter_1);
+String latitude = readString.substring(delimiter_1 + 1, delimiter_2);
+String longitude = readString.substring(delimiter_2 + 1, delimiter_3);
+String altitude1 = readString.substring(delimiter_3 + 1, delimiter_4);
+String vitesse = readString.substring(delimiter_4 + 1, delimiter_5);
+String voltage = readString.substring(delimiter_5 + 1, delimiter_6);
+String Hbmp = readString.substring(delimiter_6 + 1, delimiter_7);
+String Tbmp = readString.substring(delimiter_7 + 1, delimiter_8);
+String Vario = readString.substring(delimiter_8 + 1, delimiter_9);
+String Distance = readString.substring(delimiter_9 + 1, delimiter_10);
+String Time_gps_seconds = readString.substring(delimiter_10 + 1, delimiter_11);
+
+String RSSI = String(rssi);
+if (latitude.toFloat() == 0.0)  Distance = "0.0" ;
+
+   display.clearDisplay();
+   display.setCursor(0,0);
+   display.print("Lat:");
+   display.print(latitude);
+   
+   SerialBT.println("Heure="+ String(heure)+"="+"Latitude="+String(latitude)+"="+"Longitude="+String(longitude)+"="+"Altitude="+String(altitude1)+"="+"vitesse="+String(vitesse)+"="+"VoltageBatt="+String(voltage)+"="+"Hbmp="+String(Hbmp)+"="+"Tbmp="+String(Tbmp)+"="+"Vario="+String(Vario)+"="+"Distance="+String(Distance)+"=""Secondes="+String(Time_gps_seconds)+"="+"RSSI="+String(RSSI));
+  delay(500);
+    
+   display.setCursor(0,10);
+   display.print("Long:");
+   display.print(longitude);
+   display.setCursor(0,20);
+    display.print("Alt:");
+   display.print(altitude1);
+    display.print("  Vgps:");
+    display.print(vitesse);
+    display.setCursor(0,30);
+    display.print("Hbmp :");
+    display.print(Hbmp); 
+   display.setCursor(0,40);
+    display.print("Vario:");
+    display.print(Vario.toFloat(),2);
+    
+    display.setCursor(0,50);
+  display.print("Vbat ");
+    display.print(voltage);
+    display.print(" RSSI:");
+    display.print(rssi);
+   
+   display.display();
+
+       drone_idfr.set_lat_lon(latitude.toDouble() , longitude.toDouble());
+            drone_idfr.set_altitude(altitude1.toFloat());
+            drone_idfr.set_heigth(Hbmp.toFloat() );
+            drone_idfr.set_home_lat_lon(latitude.toFloat() , longitude.toFloat());
+            drone_idfr.set_ground_speed(vitesse.toFloat()); 
+            drone_idfr.set_heading(65);
+            
+  // if (drone_idfr.time_to_send()) {
+   
+        // write new SSID into beacon frame
+        const size_t ssid_size = (sizeof(ssid)/sizeof(*ssid)) - 1; // remove trailling null termination
+        beaconPacket[40] = ssid_size;  // set size
+        memcpy(&beaconPacket[41], ssid, ssid_size); // set ssid
+        const uint8_t header_size = 41 + ssid_size;  //TODO: remove 41 for a marker
+        
+        const uint8_t to_send = drone_idfr.generate_beacon_frame(beaconPacket, header_size);  // override the null termination
+        // Décommenter ce block pour voir la trame entière sur le port usb
+        Serial.println("beaconPacket : ");
+       // for (auto i=0; i<sizeof(beaconPacket);i++) {
+          //  Serial.print(beaconPacket[i]);
+           // Serial.print(" ");
+         // SerialBT.print (beaconPacket[i]);
+         
+        //}
+        //Serial.println(" ");
+        // SerialBT.println("");
+        /**
+         * On envoie la trame
+         */
+        ESP_ERROR_CHECK(esp_wifi_80211_tx(WIFI_IF_AP, beaconPacket, to_send, true));
+        
+        /**
+         * On reset la condition d'envoi
+         */
+       // drone_idfr.set_last_send();
+  //  }
+   
+   delay(500);
+  
+ 
+  }
+  }
+
+  
