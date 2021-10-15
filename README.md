@@ -1,4 +1,4 @@
-# universal-telemetry
+# universal telemetry for rc plane
 universal telemetry for rc plane with android application and vocal query/answer for flying parameters
 
 this universal telemetry for radio controlled aircraft is independent of the radio brand.
