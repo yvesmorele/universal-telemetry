@@ -1,0 +1,306 @@
+
+
+//Libraries for LoRa
+#include <SPI.h>
+#include <LoRa.h>
+#include <TinyGPS++.h>
+TinyGPSPlus gps;
+//Libraries for OLED Display
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_BMP280.h>
+
+
+Adafruit_BMP280 bmp; // I2C
+#include <HardwareSerial.h>
+HardwareSerial GPSSerial(1);
+//define the pins used by the LoRa transceiver module
+#define SCK 5
+#define MISO 19
+#define MOSI 27
+#define SS 18
+#define RST 14
+#define DIO0 26
+#define dP = 34;
+#define GPS_TX 2
+#define GPS_RX 23
+
+// CODE FROM ANDREI's Project https://www.instructables.com/id/DIY-Arduino-Variometer-for-Paragliding
+float vario = 0;    
+byte samples = 40;    
+byte maxsamples = 50;
+float alt[51];                                                       
+float tim[51];  
+float tempo = millis();             // Beschreibung einer Tempovariablen vom Typ float und Zuweisung eines Wertes mit der Funktion millis () - Zählt die Zeit ab Programmstart in Millisekunden
+float N1 = 0;                       // Variable zur Mittelwertbildung                                 
+float N2 = 0;                       // Variable zur Mittelwertbildung                                
+float N3 = 0;                       // Variable zur Mittelwertbildung                                 
+float D1 = 0;                       // Variable zur Mittelwertbildung                               
+float D2 = 0;                       // Variable zur Mittelwertbildung       
+
+
+
+float maxspeed = 0, speed1 = 0;
+int maxhigh = 0, high1 = 0;
+int maxsatelite = 0, satelite1 = 0;
+float altitude0BMP280=0;
+float       GPS_Distance;
+
+int sensorValue = 0;  
+  float meters ;
+  float metersbmp280 ;
+float temperaturebmp280 ;
+
+#define BAND 866E6
+
+//OLED pins
+#define BMP_SDA 21
+#define BMP_SCL 22
+#define OLED_SDA 4
+#define OLED_SCL 15 
+#define OLED_RST 16
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+
+//packet counter
+int counter = 0;
+const int potPin = 34;
+double Vout;
+int Time_GPS_seconds;
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST);
+
+
+
+void setup() {
+    GPSSerial.begin(9600, SERIAL_8N1, 23, 2);
+
+    if (!bmp.begin(0x76)) {
+    Serial.println(F("Could not find a valid BMP280 sensor, check wiring!"));
+    while (1);
+  }
+  //reset OLED display via software
+  pinMode(OLED_RST, OUTPUT);
+  digitalWrite(OLED_RST, LOW);
+  delay(20);
+  digitalWrite(OLED_RST, HIGH);
+
+
+  
+ /* Default settings from datasheet. */
+  bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,     /* Operating Mode. */
+                  Adafruit_BMP280::SAMPLING_X2,     /* Temp. oversampling */
+                  Adafruit_BMP280::SAMPLING_X16,    /* Pressure oversampling */
+                  Adafruit_BMP280::FILTER_X16,      /* Filtering. */
+                  Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
+
+altitude0BMP280=(bmp.readAltitude(1023.5));
+
+  //initialize OLED
+  Wire.begin(OLED_SDA, OLED_SCL);
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3c, false, false)) { // Address 0x3C for 128x32
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;); // Don't proceed, loop forever
+  }
+  
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  display.setTextSize(1);
+  display.setCursor(0,0);
+  display.print("LORA SENDER ");
+  display.display();
+  
+  //initialize Serial Monitor
+  Serial.begin(9600);
+ 
+  
+
+  //SPI LoRa pins
+  SPI.begin(SCK, MISO, MOSI, SS);
+  //setup LoRa transceiver module
+  LoRa.setPins(SS, RST, DIO0);
+  
+  if (!LoRa.begin(BAND)) {
+   // Serial.println("Starting LoRa failed!");
+    while (1);
+  }
+  
+  display.setCursor(0,10);
+  
+  
+ 
+  display.print("LoRa Initializing OK!");
+  display.display();
+  delay(2000);
+
+  
+  
+}
+
+void loop() {
+  Wire.begin(BMP_SDA, BMP_SCL);
+   bmp280();
+  Vout = float(((analogRead(potPin))*(5/4095.00)*8.4803-0.0894)*0.7167143); 
+
+  Serial.print(F("Temperature = "));
+    Serial.print(bmp.readTemperature());
+    Serial.println(" *C");
+
+    Serial.print(F("Pressure = "));
+    Serial.print(bmp.readPressure());
+    Serial.println(" Pa");
+
+    Serial.print(F("Approx altitude = "));
+    Serial.print(bmp.readAltitude(1030)); /* Adjusted to local forecast! */
+    Serial.println(" m");
+
+ updateValues();
+
+  VarioMSCalculation();
+  
+  //Send LoRa packet to receiver
+  LoRa.beginPacket();
+  LoRa.print("#"+(String(gps.time.hour()+2)+(":")+(gps.time.minute())+(":")+(gps.time.second())+","+String(gps.location.lat(), 6)+","+String(gps.location.lng(), 6)+(",")+String(gps.altitude.meters(),0)+(",")+String(gps.speed.kmph())));
+  LoRa.print(",");
+  LoRa.print(Vout);
+  LoRa.print(",");
+  LoRa.print((metersbmp280-altitude0BMP280),1 );
+  LoRa.print(",");
+  LoRa.print(temperaturebmp280,0  );
+  LoRa.print(",");
+  LoRa.print(vario);
+  LoRa.print(",");
+  LoRa.print(GPS_Distance);
+  LoRa.print(",");
+  LoRa.print(String(Time_GPS_seconds));
+  LoRa.print(",");
+  LoRa.print(counter);
+  LoRa.endPacket();
+
+
+
+  
+  Wire.begin(OLED_SDA, OLED_SCL);
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.print("Vbat:");
+  display.print(Vout);
+  display.print(" Alt:");
+  display.print(gps.altitude.meters(),0); 
+  display.setCursor(0,9);
+  display.print("lat : ");
+  display.print(gps.location.lat(),4 );            
+  display.setCursor(0,18);
+  display.print(" long : ");
+  display.print(gps.location.lng(),4);
+  display.setCursor(0,27);
+  display.print("Vitesse: ");
+  display.print((gps.speed.kmph()) );
+   display.setCursor(0,36);
+  display.print("Heure : ");
+  display.print(String(gps.time.hour()+2)+(":")+(gps.time.minute())+(":")+(gps.time.second()) );
+   display.setCursor(0,45);
+  display.print("Vario : ");
+  display.print (vario);
+  display.print("    m/s ");
+   display.setCursor(0,54);
+  display.print("Hbmp:");
+  display.print((metersbmp280-altitude0BMP280),1 );
+display.print("  Tbmp:");
+  display.print(temperaturebmp280,0 );
+
+  
+  display.display();
+
+
+
+  
+  counter++;
+  
+  delay(100);
+}
+
+void updateValues()
+{
+
+
+while (GPSSerial.available() > 0){
+  int data = GPSSerial.read();
+  Serial.println(data);
+   
+
+    if (gps.encode(data))
+   {
+    float Starting_Latitude = 0;
+  float Starting_Longitude = 0;  
+
+gps.encode(GPSSerial.read());
+ Serial.write(GPSSerial.read());
+float meters = (gps.altitude.meters());
+  
+  int airSpeed =( gps.speed.kmph());
+  
+if ( gps.location.lat() > 0.0 and gps.location.lng() > 0.0)
+  {
+   Starting_Longitude =radians( gps.location.lng());
+    Starting_Latitude = radians(gps.location.lat());
+    
+  }
+  
+     
+  GPS_Distance = (gps.distanceBetween( radians(gps.location.lat()), radians( gps.location.lng()), Starting_Latitude, Starting_Longitude)) ;
+   
+speed1 = (gps.speed.kmph(),0);
+  
+  String Temps=String(gps.time.hour()+2)+(":")+(gps.time.minute())+(":")+(gps.time.second());
+  String Date=String(gps.date.day())+("/")+(gps.date.month())+("/")+(gps.date.year());
+  Time_GPS_seconds=((gps.time.hour()+2)*3600)+((gps.time.minute())*60)+(gps.time.second());
+}
+}
+}
+
+void bmp280()
+{
+  metersbmp280=(bmp.readAltitude(1023.5));
+  temperaturebmp280=(bmp.readTemperature());
+}
+
+
+void VarioMSCalculation(){
+  tempo = millis();                                                      
+  N1 = 0;                                                                 
+  N2 = 0;                                                                 
+  N3 = 0;                                                                 
+  D1 = 0;                                                                
+  D2 = 0;                                                                 
+  
+  ////// ZERO VARIO /////
+  vario = 0;       
+  
+  
+  for(int cc=1; cc<=maxsamples; cc++)                                    
+  {                                                                       
+    alt[(cc-1)] = alt[cc];                                                
+    tim[(cc-1)] = tim[cc];                                                
+  }                                                                      
+                                                                          
+  alt[maxsamples] = bmp.readAltitude();                                   
+  tim[maxsamples] = tempo;                                                
+  float stime = tim[maxsamples-samples];                                  
+                                                                          
+  for(int cc=(maxsamples-samples); cc<maxsamples; cc++)                   
+  {                                                                       
+    N1+=(tim[cc]-stime)*alt[cc];                                         
+    N2+=(tim[cc]-stime);                                                  
+    N3+=(alt[cc]);                                                        
+    D1+=(tim[cc]-stime)*(tim[cc]-stime);                                  
+    D2+=(tim[cc]-stime);                                                  
+  }                                                                       
+  
+  /////VARIO VALUES CALCULATING /////
+  vario=1000*((samples*N1)-N2*N3)/(samples*D1-D2*D2);                     
+
+  
+
+}
