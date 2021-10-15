@@ -18,6 +18,6 @@ transmitter
 ![20211013_111801](https://user-images.githubusercontent.com/92593902/137517792-ddb5e83f-bdce-4375-b6a7-265b8f1e95c9.jpg)
 
 
-receiveur
+receiver
 
 ![20211013_111816](https://user-images.githubusercontent.com/92593902/137517838-a3adfdf1-c3a4-400e-ab04-1ec6e59b0eee.jpg)
